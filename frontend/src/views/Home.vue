@@ -154,7 +154,7 @@
 <script setup>
 import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import axios from 'axios'
+import request from '../utils/request'
 
 const router = useRouter()
 const questions = ref([])
@@ -171,7 +171,7 @@ const newQuestion = ref({
 })
 
 const loadQuestions = async () => {
-  const res = await axios.get('/api/questions', {
+  const res = await request.get('/questions', {
     params: {
       tagId: selectedTag.value,
       sort: sort.value,
@@ -184,21 +184,21 @@ const loadQuestions = async () => {
 }
 
 const loadTags = async () => {
-  const res = await axios.get('/api/tags')
+  const res = await request.get('/tags')
   if (res.data.code === 0) {
     tags.value = res.data.data
   }
 }
 
 const loadHotQuestions = async () => {
-  const res = await axios.get('/api/questions/hot')
+  const res = await request.get('/questions/hot')
   if (res.data.code === 0) {
     hotQuestions.value = res.data.data
   }
 }
 
 const toggleFavorite = async (q) => {
-  const res = await axios.post(`/api/questions/${q.id}/favorite`)
+  const res = await request.post(`/questions/${q.id}/favorite`)
   if (res.data.code === 0) {
     q.is_favorited = res.data.data.favorited
     q.favorite_count += res.data.data.favorited ? 1 : -1
@@ -210,7 +210,7 @@ const submitQuestion = async () => {
     alert('请填写标题和内容')
     return
   }
-  const res = await axios.post('/api/questions', newQuestion.value)
+  const res = await request.post('/questions', newQuestion.value)
   if (res.data.code === 0) {
     showAskModal.value = false
     newQuestion.value = { title: '', content: '', tagId: null }

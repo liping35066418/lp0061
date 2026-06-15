@@ -93,7 +93,7 @@ const answers = ref([])
 const newAnswer = ref('')
 
 const loadQuestion = async () => {
-  const res = await axios.get(`/api/questions/${route.params.id}`)
+  const res = await request.get(`/questions/${route.params.id}`)
   if (res.data.code === 0) {
     question.value = res.data.data
     answers.value = res.data.data.answers
@@ -120,7 +120,7 @@ const submitAnswer = async () => {
     alert('请输入回答内容')
     return
   }
-  const res = await axios.post(`/api/questions/${question.value.id}/answers`, {
+  const res = await request.post(`/questions/${question.value.id}/answers`, {
     content: newAnswer.value
   })
   if (res.data.code === 0) {

@@ -109,7 +109,7 @@
 
 <script setup>
 import { ref, computed, onMounted } from 'vue'
-import axios from 'axios'
+import request from '../utils/request'
 
 const stats = ref({})
 
@@ -156,7 +156,7 @@ const answerTrendData = computed(() => {
 })
 
 const loadStats = async () => {
-  const res = await axios.get('/api/admin/stats')
+  const res = await request.get('/admin/stats')
   if (res.data.code === 0) {
     stats.value = res.data.data
   }

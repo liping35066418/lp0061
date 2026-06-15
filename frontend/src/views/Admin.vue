@@ -152,7 +152,7 @@
 
 <script setup>
 import { ref, onMounted } from 'vue'
-import axios from 'axios'
+import request from '../utils/request'
 
 const activeTab = ref('questions')
 const questions = ref([])
@@ -189,7 +189,7 @@ const formatDate = (time) => {
 }
 
 const loadQuestions = async () => {
-  const res = await axios.get('/api/admin/questions', {
+  const res = await request.get('/admin/questions', {
     params: filters.value
   })
   if (res.data.code === 0) {
@@ -198,35 +198,35 @@ const loadQuestions = async () => {
 }
 
 const loadAnswers = async () => {
-  const res = await axios.get('/api/admin/answers')
+  const res = await request.get('/admin/answers')
   if (res.data.code === 0) {
     answers.value = res.data.data
   }
 }
 
 const loadTags = async () => {
-  const res = await axios.get('/api/tags')
+  const res = await request.get('/tags')
   if (res.data.code === 0) {
     tags.value = res.data.data
   }
 }
 
 const updateQuestionStatus = async (q, status) => {
-  const res = await axios.post(`/api/admin/questions/${q.id}/status`, { status })
+  const res = await request.post(`/admin/questions/${q.id}/status`, { status })
   if (res.data.code === 0) {
     q.status = status
   }
 }
 
 const togglePin = async (q) => {
-  const res = await axios.post(`/api/admin/questions/${q.id}/pin`, { pinned: !q.is_pinned })
+  const res = await request.post(`/admin/questions/${q.id}/pin`, { pinned: !q.is_pinned })
   if (res.data.code === 0) {
     q.is_pinned = q.is_pinned ? 0 : 1
   }
 }
 
 const updateAnswerStatus = async (a, status) => {
-  const res = await axios.post(`/api/admin/answers/${a.id}/status`, { status })
+  const res = await request.post(`/admin/answers/${a.id}/status`, { status })
   if (res.data.code === 0) {
     a.status = status
   }

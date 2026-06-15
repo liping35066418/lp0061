@@ -3,9 +3,12 @@ const cors = require('cors')
 const bodyParser = require('body-parser')
 const Database = require('better-sqlite3')
 const path = require('path')
+const bcrypt = require('bcryptjs')
+const jwt = require('jsonwebtoken')
 
 const app = express()
 const PORT = 8751
+const JWT_SECRET = 'qa-community-secret-key-2024'
 
 app.use(cors())
 app.use(bodyParser.json())
@@ -16,6 +19,7 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     username TEXT UNIQUE NOT NULL,
+    password TEXT,
     avatar TEXT,
     role TEXT DEFAULT 'user',
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -74,14 +78,21 @@ db.exec(`
   );
 `)
 
+try {
+  db.prepare('SELECT password FROM users LIMIT 1').get()
+} catch (e) {
+  db.exec('ALTER TABLE users ADD COLUMN password TEXT')
+}
+
 const initData = db.transaction(() => {
   const userCount = db.prepare('SELECT COUNT(*) as count FROM users').get().count
   if (userCount === 0) {
-    const insertUser = db.prepare('INSERT INTO users (username, avatar, role) VALUES (?, ?, ?)')
-    insertUser.run('张三', 'https://api.dicebear.com/7.x/avataaars/svg?seed=zhangsan', 'user')
-    insertUser.run('李四', 'https://api.dicebear.com/7.x/avataaars/svg?seed=lisi', 'user')
-    insertUser.run('王五', 'https://api.dicebear.com/7.x/avataaars/svg?seed=wangwu', 'user')
-    insertUser.run('管理员', 'https://api.dicebear.com/7.x/avataaars/svg?seed=admin', 'admin')
+    const hash = bcrypt.hashSync('123456', 10)
+    const insertUser = db.prepare('INSERT INTO users (username, password, avatar, role) VALUES (?, ?, ?, ?)')
+    insertUser.run('张三', hash, 'https://api.dicebear.com/7.x/avataaars/svg?seed=zhangsan', 'user')
+    insertUser.run('李四', hash, 'https://api.dicebear.com/7.x/avataaars/svg?seed=lisi', 'user')
+    insertUser.run('王五', hash, 'https://api.dicebear.com/7.x/avataaars/svg?seed=wangwu', 'user')
+    insertUser.run('管理员', hash, 'https://api.dicebear.com/7.x/avataaars/svg?seed=admin', 'admin')
   }
 
   const tagCount = db.prepare('SELECT COUNT(*) as count FROM tags').get().count
@@ -115,9 +126,108 @@ const initData = db.transaction(() => {
 })
 initData()
 
-app.use((req, res, next) => {
-  req.userId = 1
+const migratePasswords = db.transaction(() => {
+  const usersWithoutPwd = db.prepare("SELECT id FROM users WHERE password IS NULL OR password = ''").all()
+  if (usersWithoutPwd.length > 0) {
+    const hash = bcrypt.hashSync('123456', 10)
+    const stmt = db.prepare('UPDATE users SET password = ? WHERE id = ?')
+    for (const u of usersWithoutPwd) {
+      stmt.run(hash, u.id)
+    }
+  }
+})
+migratePasswords()
+
+const authOptional = (req, res, next) => {
+  const token = req.headers.authorization?.replace('Bearer ', '')
+  if (token) {
+    try {
+      const decoded = jwt.verify(token, JWT_SECRET)
+      req.userId = decoded.userId
+      req.userRole = decoded.role
+    } catch (e) {
+      req.userId = null
+      req.userRole = null
+    }
+  } else {
+    req.userId = null
+    req.userRole = null
+  }
   next()
+}
+
+const authRequired = (req, res, next) => {
+  const token = req.headers.authorization?.replace('Bearer ', '')
+  if (!token) {
+    return res.status(401).json({ code: 1, message: '未登录，请先登录' })
+  }
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET)
+    req.userId = decoded.userId
+    req.userRole = decoded.role
+    next()
+  } catch (e) {
+    return res.status(401).json({ code: 1, message: '登录已过期，请重新登录' })
+  }
+}
+
+const adminRequired = (req, res, next) => {
+  if (!req.userId) {
+    return res.status(401).json({ code: 1, message: '未登录，请先登录' })
+  }
+  if (req.userRole !== 'admin') {
+    return res.status(403).json({ code: 1, message: '无权限访问' })
+  }
+  next()
+}
+
+app.post('/api/register', (req, res) => {
+  const { username, password } = req.body
+  if (!username || !password) {
+    return res.json({ code: 1, message: '用户名和密码不能为空' })
+  }
+  if (password.length < 6) {
+    return res.json({ code: 1, message: '密码长度不能少于6位' })
+  }
+  const exists = db.prepare('SELECT id FROM users WHERE username = ?').get(username)
+  if (exists) {
+    return res.json({ code: 1, message: '用户名已存在' })
+  }
+  const hashed = bcrypt.hashSync(password, 10)
+  const avatar = `https://api.dicebear.com/7.x/avataaars/svg?seed=${encodeURIComponent(username)}`
+  const result = db.prepare('INSERT INTO users (username, password, avatar, role) VALUES (?, ?, ?, ?)').run(username, hashed, avatar, 'user')
+  const token = jwt.sign({ userId: result.lastInsertRowid, role: 'user' }, JWT_SECRET, { expiresIn: '7d' })
+  const user = db.prepare('SELECT id, username, avatar, role, created_at FROM users WHERE id = ?').get(result.lastInsertRowid)
+  res.json({ code: 0, data: { token, user } })
+})
+
+app.post('/api/login', (req, res) => {
+  const { username, password } = req.body
+  if (!username || !password) {
+    return res.json({ code: 1, message: '用户名和密码不能为空' })
+  }
+  const user = db.prepare('SELECT * FROM users WHERE username = ?').get(username)
+  if (!user) {
+    return res.json({ code: 1, message: '用户名或密码错误' })
+  }
+  const valid = bcrypt.compareSync(password, user.password)
+  if (!valid) {
+    return res.json({ code: 1, message: '用户名或密码错误' })
+  }
+  const token = jwt.sign({ userId: user.id, role: user.role }, JWT_SECRET, { expiresIn: '7d' })
+  const { password: _, ...safeUser } = user
+  res.json({ code: 0, data: { token, user: safeUser } })
+})
+
+app.get('/api/user', authOptional, (req, res) => {
+  if (!req.userId) {
+    return res.json({ code: 1, message: '未登录' })
+  }
+  const user = db.prepare('SELECT id, username, avatar, role, created_at FROM users WHERE id = ?').get(req.userId)
+  if (!user) {
+    return res.json({ code: 1, message: '用户不存在' })
+  }
+  res.json({ code: 0, data: user })
 })
 
 app.get('/api/tags', (req, res) => {
@@ -125,19 +235,19 @@ app.get('/api/tags', (req, res) => {
   res.json({ code: 0, data: tags })
 })
 
-app.get('/api/questions', (req, res) => {
+app.get('/api/questions', authOptional, (req, res) => {
   const { tagId, sort = 'latest', keyword } = req.query
   let sql = `
     SELECT q.*, u.username, u.avatar, t.name as tag_name, t.color as tag_color,
       (SELECT COUNT(*) FROM answers a WHERE a.question_id = q.id AND a.status = 'approved') as answer_count,
       (SELECT COUNT(*) FROM favorites f WHERE f.question_id = q.id) as favorite_count,
-      EXISTS(SELECT 1 FROM favorites f WHERE f.question_id = q.id AND f.user_id = ?) as is_favorited
+      ${req.userId ? "EXISTS(SELECT 1 FROM favorites f WHERE f.question_id = q.id AND f.user_id = ?)" : "0 as is_favorited"}
     FROM questions q
     LEFT JOIN users u ON q.user_id = u.id
     LEFT JOIN tags t ON q.tag_id = t.id
     WHERE q.status = 'approved'
   `
-  const params = [req.userId]
+  const params = req.userId ? [req.userId] : []
 
   if (tagId && tagId !== 'all') {
     sql += ' AND q.tag_id = ?'
@@ -170,38 +280,44 @@ app.get('/api/questions/hot', (req, res) => {
   res.json({ code: 0, data: questions })
 })
 
-app.get('/api/questions/:id', (req, res) => {
+app.get('/api/questions/:id', authOptional, (req, res) => {
   const { id } = req.params
   db.prepare('UPDATE questions SET views = views + 1 WHERE id = ?').run(id)
 
-  const question = db.prepare(`
+  let sql = `
     SELECT q.*, u.username, u.avatar, t.name as tag_name, t.color as tag_color,
       (SELECT COUNT(*) FROM answers a WHERE a.question_id = q.id AND a.status = 'approved') as answer_count,
-      EXISTS(SELECT 1 FROM favorites f WHERE f.question_id = q.id AND f.user_id = ?) as is_favorited
+      ${req.userId ? "EXISTS(SELECT 1 FROM favorites f WHERE f.question_id = q.id AND f.user_id = ?)" : "0 as is_favorited"}
     FROM questions q
     LEFT JOIN users u ON q.user_id = u.id
     LEFT JOIN tags t ON q.tag_id = t.id
     WHERE q.id = ?
-  `).get(req.userId, id)
+  `
+  const params = req.userId ? [req.userId, id] : [id]
+
+  const question = db.prepare(sql).get(...params)
 
   if (!question) {
     return res.json({ code: 1, message: '问题不存在' })
   }
 
-  const answers = db.prepare(`
+  let answerSql = `
     SELECT a.*, u.username, u.avatar,
       (SELECT COUNT(*) FROM likes l WHERE l.answer_id = a.id) as like_count,
-      EXISTS(SELECT 1 FROM likes l WHERE l.answer_id = a.id AND l.user_id = ?) as is_liked
+      ${req.userId ? "EXISTS(SELECT 1 FROM likes l WHERE l.answer_id = a.id AND l.user_id = ?)" : "0 as is_liked"}
     FROM answers a
     LEFT JOIN users u ON a.user_id = u.id
     WHERE a.question_id = ? AND a.status = 'approved'
     ORDER BY a.created_at DESC
-  `).all(req.userId, id)
+  `
+  const answerParams = req.userId ? [req.userId, id] : [id]
+
+  const answers = db.prepare(answerSql).all(...answerParams)
 
   res.json({ code: 0, data: { ...question, answers } })
 })
 
-app.post('/api/questions', (req, res) => {
+app.post('/api/questions', authRequired, (req, res) => {
   const { title, content, tagId } = req.body
   if (!title || !content) {
     return res.json({ code: 1, message: '标题和内容不能为空' })
@@ -210,7 +326,7 @@ app.post('/api/questions', (req, res) => {
   res.json({ code: 0, data: { id: result.lastInsertRowid } })
 })
 
-app.post('/api/questions/:id/answers', (req, res) => {
+app.post('/api/questions/:id/answers', authRequired, (req, res) => {
   const { id } = req.params
   const { content } = req.body
   if (!content) {
@@ -220,7 +336,7 @@ app.post('/api/questions/:id/answers', (req, res) => {
   res.json({ code: 0, data: { id: result.lastInsertRowid } })
 })
 
-app.post('/api/answers/:id/like', (req, res) => {
+app.post('/api/answers/:id/like', authRequired, (req, res) => {
   const { id } = req.params
   const exists = db.prepare('SELECT id FROM likes WHERE answer_id = ? AND user_id = ?').get(id, req.userId)
   if (exists) {
@@ -232,7 +348,7 @@ app.post('/api/answers/:id/like', (req, res) => {
   }
 })
 
-app.post('/api/questions/:id/favorite', (req, res) => {
+app.post('/api/questions/:id/favorite', authRequired, (req, res) => {
   const { id } = req.params
   const exists = db.prepare('SELECT id FROM favorites WHERE question_id = ? AND user_id = ?').get(id, req.userId)
   if (exists) {
@@ -244,7 +360,7 @@ app.post('/api/questions/:id/favorite', (req, res) => {
   }
 })
 
-app.get('/api/admin/questions', (req, res) => {
+app.get('/api/admin/questions', authRequired, adminRequired, (req, res) => {
   const { status, tagId, startDate, endDate } = req.query
   let sql = `
     SELECT q.*, u.username, t.name as tag_name,
@@ -279,7 +395,7 @@ app.get('/api/admin/questions', (req, res) => {
   res.json({ code: 0, data: questions })
 })
 
-app.get('/api/admin/answers', (req, res) => {
+app.get('/api/admin/answers', authRequired, adminRequired, (req, res) => {
   const answers = db.prepare(`
     SELECT a.*, u.username, q.title as question_title
     FROM answers a
@@ -290,28 +406,28 @@ app.get('/api/admin/answers', (req, res) => {
   res.json({ code: 0, data: answers })
 })
 
-app.post('/api/admin/questions/:id/status', (req, res) => {
+app.post('/api/admin/questions/:id/status', authRequired, adminRequired, (req, res) => {
   const { id } = req.params
   const { status } = req.body
   db.prepare('UPDATE questions SET status = ? WHERE id = ?').run(status, id)
   res.json({ code: 0, message: '操作成功' })
 })
 
-app.post('/api/admin/questions/:id/pin', (req, res) => {
+app.post('/api/admin/questions/:id/pin', authRequired, adminRequired, (req, res) => {
   const { id } = req.params
   const { pinned } = req.body
   db.prepare('UPDATE questions SET is_pinned = ? WHERE id = ?').run(pinned ? 1 : 0, id)
   res.json({ code: 0, message: '操作成功' })
 })
 
-app.post('/api/admin/answers/:id/status', (req, res) => {
+app.post('/api/admin/answers/:id/status', authRequired, adminRequired, (req, res) => {
   const { id } = req.params
   const { status } = req.body
   db.prepare('UPDATE answers SET status = ? WHERE id = ?').run(status, id)
   res.json({ code: 0, message: '操作成功' })
 })
 
-app.get('/api/admin/stats', (req, res) => {
+app.get('/api/admin/stats', authRequired, adminRequired, (req, res) => {
   const totalQuestions = db.prepare('SELECT COUNT(*) as count FROM questions').get().count
   const totalAnswers = db.prepare('SELECT COUNT(*) as count FROM answers').get().count
   const totalUsers = db.prepare('SELECT COUNT(*) as count FROM users').get().count
@@ -357,11 +473,6 @@ app.get('/api/admin/stats', (req, res) => {
       activeUsers
     }
   })
-})
-
-app.get('/api/user', (req, res) => {
-  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.userId)
-  res.json({ code: 0, data: user })
 })
 
 app.listen(PORT, '0.0.0.0', () => {
